@@ -437,4 +437,3 @@ When attempting to create a duplicate poll, the response is now more appropriate
 4. Clean domain-specific error codes
 5. Preventive check before database operation
 
-Would you like me to expand on any part of this documentation?
