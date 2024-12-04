@@ -134,3 +134,143 @@ flowchart TD
     F --> G[Client Gets Sanitized Response]
 ```
 
+# Modern Exception Handling in .NET 8+
+
+## Overview of Changes
+.NET 8 introduces a more streamlined approach to exception handling that eliminates the need for custom middleware. The new approach uses built-in functionality through `IExceptionHandler`.
+
+## Implementation
+
+### 1. Global Exception Handler
+
+Create a new class in the Errors folder that implements `IExceptionHandler`:
+
+```csharp
+public class GlobalExceptionHandler : IExceptionHandler
+{
+    private readonly ILogger<GlobalExceptionHandler> _logger;
+
+    public GlobalExceptionHandler(ILogger<GlobalExceptionHandler> logger)
+    {
+        _logger = logger;
+    }
+
+    public async ValueTask<bool> TryHandleAsync(
+        HttpContext httpContext,
+        Exception exception,
+        CancellationToken cancellationToken)
+    {
+        _logger.LogError(
+            exception, 
+            "Something went wrong: {Message}",
+            exception.Message);
+
+        var problemDetails = new ProblemDetails
+        {
+            Status = StatusCodes.Status500InternalServerError,
+            Title = "Internal Server Error",
+            Type = "https://datatracker.ietf/doc/html/rfc7231#section-6.6.1"
+        };
+
+        httpContext.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        await httpContext.Response.WriteAsJsonAsync(
+            problemDetails,
+            cancellationToken: cancellationToken);
+            
+        return true;
+    }
+}
+```
+
+### 2. Dependency Injection Setup
+
+Update the `DependencyInjection` class to include the new exception handling:
+
+```csharp
+public static class DependencyInjection
+{
+    public static IServiceCollection AddDependencies(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddControllers();
+        
+        services.AddCors(options =>
+            options.AddDefaultPolicy(builder =>
+                builder
+                    .AllowAnyMethod()
+                    .AllowAnyHeader()
+                    .WithOrigins(configuration.GetSection("AllowedOrigins").Get<string[]>()!)));
+        
+        services.AddAuthConfig(configuration);
+        
+        var connectionString = configuration.GetConnectionString("DefaultConnection") ??
+            throw new InvalidOperationException("ConnectionString 'DefaultConnection' not found.");
+        
+        services.AddDbContext<ApplicationDbContext>(options => 
+            options.UseSqlServer(connectionString));
+            
+        services
+            .AddSwaggerServices()
+            .AddMapsterConfig()
+            .AddFluentValidationConfig();
+            
+        services.AddScoped<IAuthService, AuthService>();
+        services.AddScoped<IPollService, PollService>();
+
+        // New exception handling configuration
+        services.AddExceptionHandler<GlobalExceptionHandler>();
+        services.AddProblemDetails();
+
+        return services;
+    }
+}
+```
+
+### 3. Pipeline Configuration
+
+Update the request pipeline in Program.cs:
+
+```csharp
+var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+app.UseCors();
+app.UseAuthorization();
+app.MapControllers();
+app.UseExceptionHandler();  // New built-in exception handler
+app.Run();
+```
+
+## Key Differences from Previous Approach
+
+```mermaid
+flowchart TD
+    A[Previous: Custom Middleware] --> B[New: Built-in IExceptionHandler]
+    B --> C[Benefits]
+    C --> D[Built-in Integration]
+    C --> E[Cleaner Implementation]
+    C --> F[Same Functionality]
+```
+
+## Results
+As noted, testing the endpoint produces:
+- Same sanitized response for clients
+- Error logging in the terminal
+- No need for custom middleware implementation
+
+## Cleanup
+The previous middleware can now be safely removed, as the new `GlobalExceptionHandler` provides the same functionality with built-in .NET support.
+
+## Key Points
+1. Implements `IExceptionHandler` interface
+2. Uses `TryHandleAsync` method for exception processing
+3. Maintains same logging and response format
+4. Integrates with dependency injection system
+5. Uses built-in middleware in request pipeline
