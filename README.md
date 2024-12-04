@@ -274,3 +274,167 @@ The previous middleware can now be safely removed, as the new `GlobalExceptionHa
 3. Maintains same logging and response format
 4. Integrates with dependency injection system
 5. Uses built-in middleware in request pipeline
+
+
+# Handling Duplicate Poll Entries
+
+## Initial Scenario
+
+As described in the notes, when creating a poll with this payload:
+```json
+{
+    "title": "Poll - 1",
+    "summary": "summary",
+    "startsAt": "2024-04-04",
+    "endsAt": "2024-04-05"
+}
+```
+
+First request succeeds with response:
+```json
+{
+    "id": "3",
+    "title": "Poll - 1",
+    "summary": "summary",
+    "isPublished": false,
+    "startsAt": "2024-04-04",
+    "endsAt": "2024-04-05"
+}
+```
+
+## The Problem
+
+When sending identical poll data again, it triggers a 500 error:
+```json
+{
+    "type": "https://datatracker.ietf.org/doc/html/rfc7231#secion-6.6.1",
+    "title": "Internal Server Error",
+    "status": 500
+}
+```
+
+This occurs due to the unique constraint on the Poll title in the database configuration:
+
+```csharp
+public class PollConfiguration : IEntityTypeConfiguration<Poll>
+{
+    public void Configure(EntityTypeBuilder<Poll> builder)
+    {
+        builder.HasIndex(x => x.Title).IsUnique();
+        builder.Property(x => x.Title).HasMaxLength(100);
+        builder.Property(x => x.Summary).HasMaxLength(1500);
+    }
+}
+```
+
+## The Solution
+
+### 1. Define Poll Errors
+
+```csharp
+public static class PollErrors
+{
+    public static readonly Error PollNotFound =
+        new("Poll.NotFound", "No Poll was found with the given ID");
+        
+    public static readonly Error DuplicatedPollTitle =
+        new("Poll.DuplicatedTitle", "Another Poll with the same title is already exists");
+}
+```
+
+### 2. Update Service Interface
+
+```csharp
+public interface IPollService
+{
+    Task<IEnumerable<Poll>> GetAllAsync(CancellationToken cancellationToken = default);
+    Task<Result<PollResponse>> GetAsync(int id, CancellationToken cancellationToken = default);
+    Task<Result<PollResponse>> AddAsync(PollRequest request, CancellationToken cancellationToken = default);
+    Task<Result> UpdateAsync(int id, PollRequest request, CancellationToken cancellationToken = default);
+    Task<Result> DeleteAsync(int id, CancellationToken cancellationToken = default);
+    Task<Result> TogglePublishStatusAsync(int id, CancellationToken cancellationToken = default);
+}
+```
+
+### 3. Implement New Add Method
+
+Original implementation:
+```csharp
+public async Task<PollResponse> AddAsync(PollRequest request, CancellationToken cancellationToken = default)
+{
+    var poll = request.Adapt<Poll>();    
+    await _context.AddAsync(poll, cancellationToken);
+    await _context.SaveChangesAsync(cancellationToken);
+    return poll.Adapt<PollResponse>();
+}
+```
+
+New implementation with title check:
+```csharp
+public async Task<Result<PollResponse>> AddAsync(PollRequest request, CancellationToken cancellationToken = default)
+{
+    var isExistingTitle = await _context.Polls.AnyAsync(
+        x => x.Title == request.Title,
+        cancellationToken: cancellationToken);
+        
+    if(isExistingTitle)
+        return Result.Failure<PollResponse>(PollErrors.DuplicatedPollTitle);
+    
+    var poll = request.Adapt<Poll>();    
+    await _context.AddAsync(poll, cancellationToken);
+    await _context.SaveChangesAsync(cancellationToken);
+    return Result.Success(poll.Adapt<PollResponse>());
+}
+```
+
+### 4. Update Controller
+
+Original implementation:
+```csharp
+[HttpPost("")]
+public async Task<IActionResult> Add(
+    [FromBody] PollRequest request,
+    CancellationToken cancellationToken)
+{
+    var result = await _pollService.AddAsync(request, cancellationToken);
+    return CreatedAtAction(nameof(Get), new { id = newPoll.Id }, newPoll);
+}
+```
+
+New implementation with error handling:
+```csharp
+[HttpPost("")]
+public async Task<IActionResult> Add(
+    [FromBody] PollRequest request,
+    CancellationToken cancellationToken)
+{
+    var result = await _pollService.AddAsync(request, cancellationToken);
+    return result.IsSuccess
+        ? CreatedAtAction(nameof(Get), new { id = result.Value.Id }, result.Value)
+        : result.ToProblem(StatusCodes.Status409Conflict);
+}
+```
+
+## Final Result
+
+When attempting to create a duplicate poll, the response is now more appropriate:
+```json
+{
+    "type": "https://tools.ietf.org/html/rfc9110#section-15.5.10",
+    "title": "Conflict",
+    "status": 409,
+    "errors": [{
+        "code": "Poll.NotFound",
+        "description": "Another poll with the same title is already exists"
+    }]
+}
+```
+
+## Key Improvements
+1. Proper error handling instead of exceptions
+2. Appropriate 409 Conflict status code
+3. Descriptive error message
+4. Clean domain-specific error codes
+5. Preventive check before database operation
+
+Would you like me to expand on any part of this documentation?
